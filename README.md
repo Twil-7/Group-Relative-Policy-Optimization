@@ -23,9 +23,9 @@ Group Relative Policy Optimization
 
 由于该问题和LLM稍有区别，因此基于GRPO算法做了如下处理：
 
-(1)原始GRPO算法，参考模型(Ref Model)是直接加载经过SFT训练好的权重的，在训练过程参考模型(Ref Model)的参数始终不变。而在这里我们并没有初始的预训练权重，索性每隔一段时间将决策网络(Actor Model)的权重赋值给参考模型(Ref Model)，其余时刻参考模型(Ref Model)的参数始终不变。
+(1) 原始GRPO算法，参考模型(Ref Model)是直接加载经过SFT训练好的权重的，在训练过程参考模型(Ref Model)的参数始终不变。而在这里我们并没有初始的预训练权重，索性每隔一段时间将决策网络(Actor Model)的权重赋值给参考模型(Ref Model)，其余时刻参考模型(Ref Model)的参数始终不变。
 
-(2)原始GRPO算法，奖励模型(Reward Model)只对最终生成的Response进行打分，只有结果奖励没有过程奖励。而在这里我们采用基于规则的奖励方式，同时包含过程奖励和结果奖励。
+(2) 原始GRPO算法，奖励模型(Reward Model)只对最终生成的Response进行打分，只有结果奖励没有过程奖励。而在这里我们采用基于规则的奖励方式，同时包含过程奖励和结果奖励。
 
 
 ```bash
@@ -51,10 +51,50 @@ class Actor(nn.Module):
         return self.net(x)
 ```
 
+智能体交互
+```
+class DropBlockEnv:
+    def __init__(self):
+        self.x = None
+        self.y = None
+        self.reset()
+
+    def reset(self, fixed_x=None):
+        self.y = INITIAL_HEIGHT
+        if fixed_x is not None:  # 允许指定初始x坐标, 因为GRPO需要对同一个prompt采样多个response, 作为一组
+            self.x = np.clip(fixed_x, X_BOUNDS[0], X_BOUNDS[1])
+        else:
+            self.x = np.random.uniform(X_BOUNDS[0], X_BOUNDS[1])
+        return self._get_state()
+
+    def _get_state(self):
+        return np.array([self.x / X_BOUNDS[1], self.y / INITIAL_HEIGHT], dtype=np.float32)
+
+    def step(self, action):
+        new_x = self.x + (1.0 if action else -1.0)
+        new_x = np.clip(new_x, X_BOUNDS[0], X_BOUNDS[1])
+        self.y -= 1.0
+        self.x = new_x
+
+        done = self.y <= 0
+        reward = self._calculate_reward(done)
+        return self._get_state(), reward, done, {}
+
+    def _calculate_reward(self, done):
+        if done:
+            return 10.0 if TARGET_RANGE[0] <= self.x <= TARGET_RANGE[1] else -10.0
+
+        distance = abs(self.x - np.mean(TARGET_RANGE))
+        in_target = TARGET_RANGE[0] <= self.x <= TARGET_RANGE[1]
+        return (0.2 if in_target else -0.1) - 0.05 * distance - 0.1
+```
+
 
 # 实验结果
 
-实验设置：总共迭代2500次，每次迭代采样10组，每组包含4条轨迹，这些轨迹的初始状态就相同，即都是从同一个二维坐标点开始运动的，利用该批采样的数据更新4次参数。在计算每个状态动作对的优势值时，我们按分组思想，对相同时间步位置的奖励进行归一化，并通过累积折扣回报得到优势值。
+实验设置：总共迭代2500次，每次迭代采样10组，每组包含4条轨迹，这些轨迹的初始状态就相同，即都是从同一个二维坐标点开始运动的，利用该批采样的数据更新4次参数。
+
+在计算每个状态动作对的优势值时，我们按分组思想，对相同时间步位置的奖励进行归一化，并通过累积折扣回报得到优势值。
 
 <div align="center">
   <img src="./files/grpo.png" alt="env" width="400"/>
